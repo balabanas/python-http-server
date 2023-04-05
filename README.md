@@ -15,3 +15,4 @@ The server is capable of:
 6. Serving `index.html` as a directory index. Serving `DOCUMENT_ROOT/directory/index.html` in response to a `/directory/` request.
 7. For successful GET requests, responding with the headers `Date`, `Server`, `Content-Length`, `Content-Type`, and `Connection`.
 8. Returning the correct `Content-Type` for `.html`, `.css`, `.js`, `.jpg`, `.jpeg`, `.png`, `.gif`, and `.swf` files.
+9. Accept spaces and `%XX` in the file names
