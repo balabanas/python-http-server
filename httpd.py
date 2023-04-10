@@ -6,7 +6,7 @@ import selectors
 HOST = 'localhost'
 PORT = 8081
 
-selector = selectors.DefaultSelector()
+# selector = selectors.DefaultSelector()
 
 
 response ="""HTTP/1.0 200 OK
@@ -18,52 +18,62 @@ Connection: close
 Content-Type: text/html
 <HTML>
 </HTML>
-"""
+\r\n\r\n
+""".encode('utf-8')
+
+tasks = []
+to_read = {}
+to_write = {}
+
 
 def server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,
-                 1)  # socket option level, socket option, reuse address after close
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
     server_socket.listen(5)
     logging.info('Server started')
-    # server_file = server_socket.makefile('rw')
-    selector.register(fileobj=server_socket, events=selectors.EVENT_READ, data=accept_connections)
+    while 1:
+        yield ('read', server_socket)
+        client_socket, addr = server_socket.accept()  # read
+        logging.info(f"Connection from {addr}")
+        tasks.append(client(client_socket))
 
 
-def send_message(client_socket):
-    request = client_socket.recv(1024)
-    # request = client_file.readline()
-    if request:
-        logging.info(f"Got request: {request.decode('utf-8')}")
-        data = f"{response}\r\n".encode('utf-8')
-        client_socket.send(data)
-        # client_file.write(data)
-        # client_file.flush()
-        logging.info(f"Sent to {client_socket.getpeername()}, data: {data}")
-    else:
-        selector.unregister(client_socket)
-        client_socket.close()
+def client(client_socket):
+    while 1:
+        yield ('read', client_socket)
+        request = client_socket.recv(4096)  # read
 
-
-def accept_connections(server_socket):
-    client_socket, a = server_socket.accept()
-    # client_file = client_socket.makefile('rw')
-    logging.info(f'Received connection from {a}')
-    selector.register(fileobj=client_socket, events=selectors.EVENT_READ, data=send_message)
+        if not request:
+            break
+        else:
+            # response = 'Hello world'.encode('utf-8')
+            yield ('write', client_socket)
+            client_socket.send(response)
+    client_socket.close()
 
 
 def event_loop():
-    while 1:
-        events = selector.select()
-        for key, _ in events:
-            callback = key.data
-            callback(key.fileobj)
-
+    while any([tasks, to_read, to_write]):
+        while not tasks:
+            ready_to_read, ready_to_write, _ = select.select(to_read, to_write, [])
+            for sock in ready_to_read:
+                tasks.append(to_read.pop(sock))
+            for sock in ready_to_write:
+                tasks.append(to_write.pop(sock))
+        try:
+            task = tasks.pop(0)
+            reason, sock = next(task)
+            if reason == 'read':
+                to_read[sock] = task
+            if reason == 'write':
+                to_write[sock] = task
+        except StopIteration:
+            logging.info('Done!')
 
 if __name__ == "__main__":
     log_format: str = '%(asctime)s %(levelname).1s %(message)s'
     logging.basicConfig(format=log_format, filename='', level='INFO',
                         datefmt='%Y-%m-%d %H:%M:%S')
-    server()
+    tasks.append(server())
     event_loop()
