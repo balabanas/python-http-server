@@ -1,17 +1,15 @@
 import datetime
+import logging
 import os
 import socket
-import logging
 import urllib
 
 import select
-import selectors
 
 HOST = 'localhost'
 PORT = 8081
 DOCUMENT_ROOT = 'html'
 SERVER_NAME = 'ServerName'
-
 
 tasks = []
 to_read = {}
@@ -21,27 +19,22 @@ to_write = {}
 def get_index(path: str) -> (bytes, bytes):
     server_name = f"\r\nServer: {SERVER_NAME}"
     date = f"\r\nDate: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}"
+
+    path = urllib.parse.urlparse(path)
+    path = urllib.parse.unquote(path.path)
+
+    document_root = os.path.abspath(DOCUMENT_ROOT)
+    request_abs_path = os.path.abspath(os.path.join(document_root, path.lstrip('/')))
+
+    if not request_abs_path.startswith(document_root):
+        return f"HTTP/1.0 403 Forbidden\r\nContent-Length: 0{server_name}{date}\r\n\r\n".encode('utf-8'), b''
+
     if path.split('/')[-1]:  # file requested
-        return get_file(f"{path}")
-    elif os.path.exists(f"{DOCUMENT_ROOT}{path}index.html"):  # dir requested, and index.html exists
-        return get_file(f"{path}index.html")
+        return get_file(request_abs_path)
+    elif os.path.exists(os.path.join(request_abs_path, 'index.html')):  # dir requested, and index.html exists
+        return get_file(os.path.join(request_abs_path, 'index.html'))
     else:  # dir requested, but no index.html there
         return f"HTTP/1.0 404 Not Found\r\nContent-Length:0{server_name}{date}\r\n\r\n".encode('utf-8'), b''
-
-    # try:
-    #     items = os.listdir(f"{DOCUMENT_ROOT}{path}")
-    # except (FileNotFoundError, NotADirectoryError):
-    #     return "HTTP/1.0 404 Not Found\r\nContent-Length:0\r\n\r\n".encode('utf-8'), b''
-    # response = f"<h1>Index of {path}</h1>"
-    # response += "<ul>"
-    # for item in items:
-    #     response += f"<li>{item}</li>"
-    # response += "</ul>"
-    # logging.info(items)
-    # body = response
-    # body = f"<html><head></head><body>{body}</body></html>"
-    # body_len = len(body)
-    # return f"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: {body_len}\r\n\r\n".encode('utf-8'), body.encode('utf-8')
 
 
 class ContentTypeProcessor:
@@ -59,8 +52,8 @@ class ContentTypeProcessor:
             return f"HTTP/1.0 404 Not Found\r\nContent-Length:0{server_name}{date}\r\n\r\n".encode('utf-8'), b''
         content_type = self.get_content_type()
         content_len = len(content)
-        headers = f"HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {content_len}{server_name}{date}\r\n\r\n".encode('utf-8')
-
+        headers = f"HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {content_len}{server_name}{date}\r\n\r\n".encode(
+            'utf-8')
         return headers, content
 
     def get_content_type(self):
@@ -91,13 +84,16 @@ class ContentTypeProcessorJPEG(ContentTypeProcessor):
     def get_content_type(self):
         return 'image/jpeg'
 
+
 class ContentTypeProcessorJS(ContentTypeProcessor):
     def get_content_type(self):
         return 'text/javascript'
 
+
 class ContentTypeProcessorPNG(ContentTypeProcessor):
     def get_content_type(self):
         return 'image/png'
+
 
 class ContentTypeProcessorSWF(ContentTypeProcessor):
     def get_content_type(self):
@@ -125,21 +121,12 @@ class ContentTypeFactory:
             return ContentTypeProcessorPlainText(path, 'r')
 
 
-def get_file(path: str) -> bytes:
-    full_path = f'{DOCUMENT_ROOT}{path}'
-    _, file_extension = os.path.splitext(full_path)
-    proc = ContentTypeFactory.get_content_type_processor(full_path, file_extension)
-    # try:
-    #     with open(f'{DOCUMENT_ROOT}{path}', 'r') as fin:
-    #         content = fin.read()
-    #         _, file_extension = os.path.splitext(f'{DOCUMENT_ROOT}{path}')
-    #         proc = ContentTypeFactory.get_content_type_processor(file_extension)
-    #         content_type = proc.get_content_type()
-    #     content_len = len(content)
-    #     response = f"HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {content_len}\r\n\r\n{content}".encode('utf-8')
-    # except (FileNotFoundError, PermissionError):
-    #     response = "HTTP/1.0 404 Not Found\r\nContent-Length:0\r\n\r\n".encode('utf-8')
+def get_file(path: str) -> (bytes, bytes):
+    # full_path = f'{DOCUMENT_ROOT}{path}'
+    _, file_extension = os.path.splitext(path)
+    proc = ContentTypeFactory.get_content_type_processor(path, file_extension)
     return proc.read()
+
 
 def server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -156,7 +143,6 @@ def server():
 
 def client(client_socket):
     while 1:
-
         if not client_socket._closed:
             yield ('read', client_socket)
             try:
@@ -164,13 +150,16 @@ def client(client_socket):
                 logging.info(f"Request: {request}")
             except ConnectionResetError:
                 break
-
         else:
             break
 
         if not request:
             break
         else:
+
+            server_name = f"\r\nServer: {SERVER_NAME}"
+            date = f"\r\nDate: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}"
+
             request = request.decode('utf-8')
             request_lines = request.splitlines()
             try:
@@ -178,39 +167,28 @@ def client(client_socket):
             except ValueError:  # bad request, not implemented
                 break
 
-            path = urllib.parse.urlparse(path)
-            path = urllib.parse.unquote(path.path)
-
             yield ('write', client_socket)
             if method in ['GET', 'HEAD']:
                 headers: bytes
                 body: bytes
-
                 headers, body = get_index(path)
                 if method == 'GET':
                     response = headers + body
                 else:
                     response = headers
-
-
-                #TODO: 403, 404
             else:
-                server_name = f"\r\nServer: {SERVER_NAME}"
-                date = f"\r\nDate: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}"
-                response = f"HTTP/1.0 405 Method Not Allowed\r\nContent-Length: 13\r\nAllow: GET, HEAD{server_name}{date}\r\n\r\nNot implemented".encode('utf-8')
+
+                response = f"HTTP/1.0 405 Method Not Allowed\r\nContent-Length: 13\r\nAllow: GET, HEAD{server_name}{date}\r\n\r\nNot implemented".encode(
+                    'utf-8')
             try:
                 print(response)
                 client_socket.sendall(response)
                 logging.info(f"Sent response: {response}")
-                # yield ('close', client_socket)
                 client_socket.shutdown(socket.SHUT_WR)
                 client_socket.close()
             except ConnectionResetError:
                 pass
 
-            # client_socket.shutdown(socket.SHUT_WR)
-            # client_socket.close()
-            # logging.info(f"Connection closed: {client_socket}")
     # logging.info(f"Closing connection: {client_socket}")
     # client_socket.shutdown(socket.SHUT_WR)
     # client_socket.close()
@@ -231,9 +209,6 @@ def event_loop():
                 to_read[sock] = task
             if reason == 'write':
                 to_write[sock] = task
-            # elif reason == 'close':
-            #     to_write.pop(sock)
-
         except StopIteration:
             logging.info('Done!')
 
