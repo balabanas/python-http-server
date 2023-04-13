@@ -5,22 +5,17 @@ import multiprocessing
 import os
 import random
 import socket
+import time
 import urllib
-
-import select
 
 HOST = 'localhost'
 PORT = 8081
 SERVER_NAME = 'ServerName'
 
-# tasks = []
-# to_read = {}
-# to_write = {}
-
 
 class Response:
     """"Keeps response elements and packs them to a complete response before sending back to a client"""
-    status = "HTTP/1.0 405 Method Not Allowed"
+    status = "HTTP/1.0 400 Bad Request"
     headers = {
         'Server': SERVER_NAME,
         'Connection': 'close',
@@ -52,35 +47,13 @@ class GETHEADHTTPWorker:
         self.tasks = []
         self.queue = queue
         self.abs_root = os.path.abspath(droot)
-        self.event_loop(self.pn, self.tasks, self.queue)
+        self.event_loop(self.queue)
 
-    def event_loop(self, pn, tasks, queue):
-        to_read = {}
-        to_write = {}
-        # while any([tasks, to_read, to_write]):
+    def event_loop(self, queue):
         while 1:
-            try:
-                new_connection = queue.get_nowait()
-                to_read[new_connection] = self.client(new_connection)
-            except:
-                pass
-            if any([tasks, to_read, to_write]):
-                while not tasks:
-                    ready_to_read, ready_to_write, _ = select.select(to_read, to_write, [])
-                    for sock in ready_to_read:
-                        tasks.append(to_read.pop(sock))
-                    for sock in ready_to_write:
-                        tasks.append(to_write.pop(sock))
-                try:
-                    task = tasks.pop(0)
-                    reason, sock = next(task)
-                    if reason == 'read':
-                        to_read[sock] = task
-                    if reason == 'write':
-                        to_write[sock] = task
-                except StopIteration:
-                    pass
-                    # logging.info('Done!')
+            socket = queue.get()
+            self.logger.info(f"Handling request from {socket.getpeername()}")
+            self.client(socket)
 
     def get_url(self, path: str) -> (str, dict, bytes):
         """Returns response components with body content from files if path is valid, or error status, if not"""
@@ -100,55 +73,40 @@ class GETHEADHTTPWorker:
         return "HTTP/1.0 404 Not Found", {}, b''
 
     def client(self, client_socket):
-        while 1:
-            if not client_socket._closed:
-                yield ('read', client_socket)
-                try:
-                    request = client_socket.recv(28096)  # read
-                    # logging.info(f"Request: {request}")
-                except ConnectionResetError:
-                    break
-            else:
-                break
+        request = client_socket.recv(28096)  # read
+        response = Response()
+        if request:
+            method: str = ''
+            path: str = ''
+            request = request.decode('utf-8')
+            request_lines = request.splitlines()
+            try:
+                method, path, protocol = request_lines[0].split()
+            except ValueError:  # bad request
+                pass
 
-            if not request:
-                break
-            else:
-                request = request.decode('utf-8')
-                request_lines = request.splitlines()
-                try:
-                    method, path, protocol = request_lines[0].split()
-                except ValueError:  # bad request, not implemented
-                    break
-                response = Response()
+            if method in ['GET', 'HEAD']:
+                status, headers, body = self.get_url(path)
+                response.status = status
+                response.headers.update(headers)
+                if method == 'GET':
+                    response.body = body
+            elif not method:
+                response.status = "HTTP 405 Method Not Allowed "
+                response.headers['Allow'] = "GET, HEAD"
 
-                yield ('write', client_socket)
-                if method in ['GET', 'HEAD']:
-                    headers: bytes
-                    body: bytes
-                    status, headers, body = self.get_url(path)
-                    response.status = status
-                    response.headers.update(headers)
-                    if method == 'GET':
-                        response.body = body
-                else:
-                    response.headers['Allow'] = "GET, HEAD"
+        client_socket.send(response.pack_response())
+        self.logger.info(f"Sent response: {response.pack_response()}")
 
-                try:
-                    client_socket.sendall(response.pack_response())
-                    logging.info(f"Sent response: {response.pack_response()}")
-                    client_socket.shutdown(socket.SHUT_WR)
-                    client_socket.close()
-                except ConnectionResetError:
-                    pass
-
-        # logging.info(f"Closing connection: {client_socket}")
         # client_socket.shutdown(socket.SHUT_WR)
-        # client_socket.close()
-
+        time.sleep(0.1)
+        client_socket.close()
 
 
 class ContentTypeProcessor:
+    """Read contents from disk by path, and returns it in response components, or 404"""
+    content_type = 'text/plain'
+
     def __init__(self, path='', read_mode='r'):
         self.path = path
         self.read_mode = read_mode
@@ -169,47 +127,39 @@ class ContentTypeProcessor:
         return "HTTP/1.0 200 OK", headers, content
 
     def get_content_type(self):
-        pass
+        return self.content_type
 
 
 class ContentTypeProcessorCSS(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/css'
+    content_type = 'text/css'
 
 
 class ContentTypeProcessorHTML(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/html'
+    content_type = 'text/html'
 
 
 class ContentTypeProcessorPlainText(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/plain'
+    content_type = 'text/plain'
 
 
 class ContentTypeProcessorGIF(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'image/gif'
+    content_type = 'image/gif'
 
 
 class ContentTypeProcessorJPEG(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'image/jpeg'
+    content_type = 'image/jpeg'
 
 
 class ContentTypeProcessorJS(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/javascript'
+    content_type = 'text/javascript'
 
 
 class ContentTypeProcessorPNG(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'image/png'
+    content_type = 'image/png'
 
 
 class ContentTypeProcessorSWF(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'application/x-shockwave-flash'
+    content_type = 'application/x-shockwave-flash'
 
 
 class ContentTypeFactory:
@@ -239,7 +189,7 @@ def main(i, queue, document_root, log_level):
 
 if __name__ == "__main__":
     parser: argparse.ArgumentParser = argparse.ArgumentParser()
-    parser.add_argument('-w', default=2, nargs='?', help='Number of workers')
+    parser.add_argument('-w', default=1, nargs='?', help='Number of workers')
     parser.add_argument('-r', default='html', nargs='?', help='Path to DOCUMENT_ROOT, relative to httpd.py')
     parser.add_argument('--log_level', type=str, default='INFO', nargs='?', help='Log level')
     args: argparse.Namespace = parser.parse_args()
@@ -267,7 +217,9 @@ if __name__ == "__main__":
         try:
             client_socket, addr = server_socket.accept()  # read
             logging.info(f"Connection from {addr}.")
-            queues[random.randint(0, args.w-1)].put(client_socket)
+            # queues[random.randint(0, args.w-1)].put(client_socket)
+            queues[0].put(client_socket)
+            print(queues[0].qsize())
         except KeyboardInterrupt:
             break
 

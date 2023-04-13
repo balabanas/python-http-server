@@ -1,8 +1,13 @@
+import argparse
 import datetime
 import logging
+import multiprocessing
 import os
+import random
 import socket
+import time
 import urllib
+from multiprocessing import Pool
 
 import select
 
@@ -11,9 +16,9 @@ PORT = 8081
 DOCUMENT_ROOT = 'html'
 SERVER_NAME = 'ServerName'
 
-tasks = []
-to_read = {}
-to_write = {}
+# tasks = []
+# to_read = {}
+# to_write = {}
 
 
 def get_index(path: str) -> (bytes, bytes):
@@ -23,7 +28,7 @@ def get_index(path: str) -> (bytes, bytes):
     path = urllib.parse.urlparse(path)
     path = urllib.parse.unquote(path.path)
 
-    document_root = os.path.abspath(DOCUMENT_ROOT)
+    # document_root = os.path.abspath(DOCUMENT_ROOT)
     request_abs_path = os.path.abspath(os.path.join(document_root, path.lstrip('/')))
 
     if not request_abs_path.startswith(document_root):
@@ -128,26 +133,13 @@ def get_file(path: str) -> (bytes, bytes):
     return proc.read()
 
 
-def server():
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((HOST, PORT))
-    server_socket.listen(5)
-    logging.info('Server started')
-    while 1:
-        yield ('read', server_socket)
-        client_socket, addr = server_socket.accept()  # read
-        logging.info(f"Connection from {addr}")
-        tasks.append(client(client_socket))
-
-
 def client(client_socket):
     while 1:
         if not client_socket._closed:
             yield ('read', client_socket)
             try:
                 request = client_socket.recv(28096)  # read
-                logging.info(f"Request: {request}")
+                # logging.info(f"Request: {request}")
             except ConnectionResetError:
                 break
         else:
@@ -181,7 +173,6 @@ def client(client_socket):
                 response = f"HTTP/1.0 405 Method Not Allowed\r\nContent-Length: 13\r\nAllow: GET, HEAD{server_name}{date}\r\n\r\nNot implemented".encode(
                     'utf-8')
             try:
-                print(response)
                 client_socket.sendall(response)
                 logging.info(f"Sent response: {response}")
                 client_socket.shutdown(socket.SHUT_WR)
@@ -194,28 +185,81 @@ def client(client_socket):
     # client_socket.close()
 
 
-def event_loop():
-    while any([tasks, to_read, to_write]):
-        while not tasks:
-            ready_to_read, ready_to_write, _ = select.select(to_read, to_write, [])
-            for sock in ready_to_read:
-                tasks.append(to_read.pop(sock))
-            for sock in ready_to_write:
-                tasks.append(to_write.pop(sock))
+def event_loop(pn, tasks, queue):
+    to_read = {}
+    to_write = {}
+    # while any([tasks, to_read, to_write]):
+    while 1:
         try:
-            task = tasks.pop(0)
-            reason, sock = next(task)
-            if reason == 'read':
-                to_read[sock] = task
-            if reason == 'write':
-                to_write[sock] = task
-        except StopIteration:
-            logging.info('Done!')
+            new_connection = queue.get_nowait()
+            to_read[new_connection] = client(new_connection)
+        except:
+            pass
+        if any([tasks, to_read, to_write]):
+            while not tasks:
+                ready_to_read, ready_to_write, _ = select.select(to_read, to_write, [])
+                # print(ready_to_read, ready_to_write, _)
+                for sock in ready_to_read:
+                    tasks.append(to_read.pop(sock))
+                for sock in ready_to_write:
+                    tasks.append(to_write.pop(sock))
+            try:
+                task = tasks.pop(0)
+                # print('task', task)
+                reason, sock = next(task)
+                # print(reason, sock)
+                if reason == 'read':
+                    to_read[sock] = task
+                if reason == 'write':
+                    to_write[sock] = task
+            except StopIteration:
+                pass
+                # logging.info('Done!')
 
+
+def main(pn, queue):
+    log_format: str = 'Worker ' + str(pn) +'. %(asctime)s %(levelname).1s %(message)s'
+    logging.basicConfig(format=log_format, filename='', level='INFO',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+    tasks = []
+    event_loop(pn, tasks, queue)
 
 if __name__ == "__main__":
+    parser: argparse.ArgumentParser = argparse.ArgumentParser()
+    parser.add_argument('-w', default=1, nargs='?', help='Number of workers')
+    parser.add_argument('-r', default='html', nargs='?', help='Path to DOCUMENT_ROOT, relative to httpd.py')
+    args: argparse.Namespace = parser.parse_args()
     log_format: str = '%(asctime)s %(levelname).1s %(message)s'
     logging.basicConfig(format=log_format, filename='', level='INFO',
                         datefmt='%Y-%m-%d %H:%M:%S')
-    tasks.append(server())
-    event_loop()
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(5)
+    logging.info('Server started')
+
+    processes = []
+    queues = []
+    n_workers = args.w
+    document_root = args.r
+    for i in range(n_workers):
+        queue = multiprocessing.Queue()
+        process = multiprocessing.Process(target=main, args=(i, queue))
+        process.start()
+        processes.append(process)
+        queues.append(queue)
+
+    while 1:
+        try:
+            client_socket, addr = server_socket.accept()  # read
+            logging.info(f"Connection from {addr}.")
+            # if not n % 100:
+            #     logging.info(f"{n}, {queues[0].qsize()}")  # {queues[1].qsize()}, {queues[2].qsize()}, {queues[3].qsize()}
+            # shortest_queue = min(range(n_workers), key=lambda x: queues[x].qsize())
+            # queues[shortest_queue].put(client_socket)
+            queues[random.randint(0, n_workers-1)].put(client_socket)
+        except KeyboardInterrupt:
+            break
+
+    for process in processes:
+        process.join()
