@@ -8,6 +8,8 @@ import socket
 import time
 import urllib
 
+import select
+
 HOST = 'localhost'
 PORT = 8081
 SERVER_NAME = 'ServerName'
@@ -15,15 +17,14 @@ SERVER_NAME = 'ServerName'
 
 class Response:
     """"Keeps response elements and packs them to a complete response before sending back to a client"""
-    status = "HTTP/1.0 400 Bad Request"
-    headers = {
-        'Server': SERVER_NAME,
-        'Connection': 'close',
-        'Content-Length': 0,
-    }
-    body = b''
-
     def __init__(self):
+        self.status = "HTTP/1.0 400 Bad Request"
+        self.headers = {
+            'Server': SERVER_NAME,
+            'Connection': 'close',
+            'Content-Length': 0,
+        }
+        self.body = b''
         self.headers['Data'] = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
 
     def pack_response(self):
@@ -34,7 +35,7 @@ class Response:
 
 
 class GETHEADHTTPWorker:
-    def __init__(self, pn, queue, droot, log_level):
+    def __init__(self, pn, queue, droot, log_level, server_socket):
         self.logger = logging.getLogger(f'worker{pn}')
         self.logger.setLevel(log_level)
         handler = logging.StreamHandler()
@@ -47,20 +48,28 @@ class GETHEADHTTPWorker:
         self.tasks = []
         self.queue = queue
         self.abs_root = os.path.abspath(droot)
-        self.event_loop(self.queue)
+        self.event_loop(self.queue, server_socket)
 
-    def event_loop(self, queue):
+    def event_loop(self, worker_queue, server_socket):
+        # print(client_socket)
         while 1:
-            socket = queue.get()
-            self.logger.info(f"Handling request from {socket.getpeername()}")
-            self.client(socket)
+            # if not queue:
+            #     socket = client_socket
+            # else:
+            _ = worker_queue.get()
+            request_socket, addr = server_socket.accept()
+            # self.logger.info(f"Handling request from {socket.getpeername()}")
+            self.logger.info(f"Handling request from {request_socket.getpeername()}")
+            # print('socket', socket)
+            self.client(request_socket)
 
     def get_url(self, path: str) -> (str, dict, bytes):
         """Returns response components with body content from files if path is valid, or error status, if not"""
         path = urllib.parse.urlparse(path)
         path = urllib.parse.unquote(path.path)
         request_abs_path = os.path.abspath(os.path.join(self.abs_root, path.lstrip('/')))
-        self.logger.debug(request_abs_path)
+        # self.logger.debug(request_abs_path)
+        logging.debug(request_abs_path)
         if not request_abs_path.startswith(self.abs_root):
             return "HTTP/1.0 403 Forbidden", {}, b''
         if path.split('/')[-1]:  # file requested
@@ -72,8 +81,9 @@ class GETHEADHTTPWorker:
             return proc.read()
         return "HTTP/1.0 404 Not Found", {}, b''
 
-    def client(self, client_socket):
-        request = client_socket.recv(28096)  # read
+    def client(self, current_socket):
+        request = current_socket.recv(28096)  # read
+        print(request)
         response = Response()
         if request:
             method: str = ''
@@ -90,17 +100,20 @@ class GETHEADHTTPWorker:
                 response.status = status
                 response.headers.update(headers)
                 if method == 'GET':
+                    # response.headers['Content-Length'] = 0
                     response.body = body
             elif not method:
                 response.status = "HTTP 405 Method Not Allowed "
                 response.headers['Allow'] = "GET, HEAD"
 
-        client_socket.send(response.pack_response())
+        current_socket.send(response.pack_response())
         self.logger.info(f"Sent response: {response.pack_response()}")
+        # logging.info(f"Sent to {client_socket}: {response.pack_response()}")
 
         # client_socket.shutdown(socket.SHUT_WR)
-        time.sleep(0.1)
-        client_socket.close()
+        # time.sleep(0.1)
+        current_socket.close()
+        self.logger.info(f"Closed socket: {current_socket}")
 
 
 class ContentTypeProcessor:
@@ -183,13 +196,13 @@ class ContentTypeFactory:
             return ContentTypeProcessorPlainText(path, 'r')
 
 
-def main(i, queue, document_root, log_level):
-    GETHEADHTTPWorker(i, queue, document_root, log_level)
+def main(i, queue, document_root, log_level, server_socket):
+    GETHEADHTTPWorker(i, queue, document_root, log_level, server_socket)
 
 
 if __name__ == "__main__":
     parser: argparse.ArgumentParser = argparse.ArgumentParser()
-    parser.add_argument('-w', default=1, nargs='?', help='Number of workers')
+    parser.add_argument('-w', default=2, nargs='?', help='Number of workers')
     parser.add_argument('-r', default='html', nargs='?', help='Path to DOCUMENT_ROOT, relative to httpd.py')
     parser.add_argument('--log_level', type=str, default='INFO', nargs='?', help='Log level')
     args: argparse.Namespace = parser.parse_args()
@@ -208,20 +221,28 @@ if __name__ == "__main__":
     queues = []
     for i in range(args.w):
         queue = multiprocessing.Queue()
-        process = multiprocessing.Process(target=main, args=(i, queue, args.r, log_level))
+        process = multiprocessing.Process(target=main, args=(i, queue, args.r, log_level, server_socket))
         process.start()
         processes.append(process)
         queues.append(queue)
-
+    #
     while 1:
         try:
-            client_socket, addr = server_socket.accept()  # read
-            logging.info(f"Connection from {addr}.")
-            # queues[random.randint(0, args.w-1)].put(client_socket)
-            queues[0].put(client_socket)
-            print(queues[0].qsize())
+            # logging.info("Before sel")
+            ready_to_read, _, _ = select.select([server_socket], [], [])
+            # client_socket, addr = server_socket.accept()  # read
+            # logging.info("After sel")
+            # logging.info(f"Connection from {addr}.")
+            qn = random.randint(0, args.w-1)
+            queues[qn].put(1)
+            # logging.info(f"Put to a queue {qn}")
+            # queues[0].put(client_socket)
+    #         print(queues[0].qsize())
+    #         serv = GETHEADHTTPWorker(0, None, args.r, log_level, client_socket)
+    #         serv.client(client_socket)
+            # serv.event_loop()
         except KeyboardInterrupt:
             break
-
-    for process in processes:
-        process.join()
+    #
+    # for process in processes:
+    #     process.join()
