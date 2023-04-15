@@ -35,33 +35,34 @@ class Response:
 
 
 class GETHEADHTTPWorker:
-    def __init__(self, pn, queue, droot, log_level, server_socket):
-        self.logger = logging.getLogger(f'worker{pn}')
-        self.logger.setLevel(log_level)
-        handler = logging.StreamHandler()
-        handler.setLevel(log_level)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
-        self.logger.info(f"Worker {pn} created")
-        self.pn = pn
-        self.tasks = []
-        self.queue = queue
-        self.abs_root = os.path.abspath(droot)
-        self.event_loop(self.queue, server_socket)
+    # def __init__(self, pn, queue, droot, log_level, server_socket):
+    def __init__(self, socket):
+        # self.logger = logging.getLogger(f'worker{os.getpid()}')
+        # self.logger.setLevel(log_level)
+        # handler = logging.StreamHandler()
+        # handler.setLevel(log_level)
+        # formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        # handler.setFormatter(formatter)
+        # self.logger.addHandler(handler)
+        logging.info(f"{multiprocessing.current_process().name} running...")
+        # self.pn = pn
+        # self.tasks = []
+        # self.queue = queue
+        self.abs_root = os.path.abspath('html')
+        # self.event_loop(self.queue, server_socket)
 
-    def event_loop(self, worker_queue, server_socket):
-        # print(client_socket)
-        while 1:
-            # if not queue:
-            #     socket = client_socket
-            # else:
-            _ = worker_queue.get()
-            request_socket, addr = server_socket.accept()
-            # self.logger.info(f"Handling request from {socket.getpeername()}")
-            self.logger.info(f"Handling request from {request_socket.getpeername()}")
-            # print('socket', socket)
-            self.client(request_socket)
+    # def event_loop(self, socket):
+    #     # print(client_socket)
+    #     # while 1:
+    #         # if not queue:
+    #         #     socket = client_socket
+    #         # else:
+    #         # _ = worker_queue.get()
+    #         # request_socket, addr = server_socket.accept()
+    #         # self.logger.info(f"Handling request from {socket.getpeername()}")
+    #         self.logger.info(f"Handling request from {request_socket.getpeername()}")
+    #         # print('socket', socket)
+    #         self.client(request_socket)
 
     def get_url(self, path: str) -> (str, dict, bytes):
         """Returns response components with body content from files if path is valid, or error status, if not"""
@@ -83,7 +84,8 @@ class GETHEADHTTPWorker:
 
     def client(self, current_socket):
         request = current_socket.recv(28096)  # read
-        print(request)
+        # print(request)
+        logging.debug(f"{multiprocessing.current_process().name} got request {request.decode()}")
         response = Response()
         if request:
             method: str = ''
@@ -99,21 +101,25 @@ class GETHEADHTTPWorker:
                 status, headers, body = self.get_url(path)
                 response.status = status
                 response.headers.update(headers)
-                if method == 'GET':
-                    # response.headers['Content-Length'] = 0
-                    response.body = body
+                match method:
+                    case 'GET':
+                        # response.headers['Content-Length'] = 0
+                        response.body = body
+                    # case 'HEAD':
+                    #     response.headers['Content-Length'] = 0
+
             elif not method:
                 response.status = "HTTP 405 Method Not Allowed "
                 response.headers['Allow'] = "GET, HEAD"
 
-        current_socket.send(response.pack_response())
-        self.logger.info(f"Sent response: {response.pack_response()}")
+        current_socket.sendall(response.pack_response())
+        # print(f"Sent response: {response.pack_response()}")
         # logging.info(f"Sent to {client_socket}: {response.pack_response()}")
 
-        # client_socket.shutdown(socket.SHUT_WR)
+        current_socket.shutdown(socket.SHUT_WR)
         # time.sleep(0.1)
         current_socket.close()
-        self.logger.info(f"Closed socket: {current_socket}")
+        # print(f"Closed socket: {current_socket}")
 
 
 class ContentTypeProcessor:
@@ -196,15 +202,21 @@ class ContentTypeFactory:
             return ContentTypeProcessorPlainText(path, 'r')
 
 
-def main(i, queue, document_root, log_level, server_socket):
-    GETHEADHTTPWorker(i, queue, document_root, log_level, server_socket)
+# def main(i, queue, document_root, log_level, server_socket):
+def main(socket, log_level):
+    logger = logging.getLogger()
+    logger.setLevel(log_level)
+
+    worker = GETHEADHTTPWorker(socket)
+    # print(os.getpid())
+    worker.client(socket)
 
 
 if __name__ == "__main__":
     parser: argparse.ArgumentParser = argparse.ArgumentParser()
     parser.add_argument('-w', default=2, nargs='?', help='Number of workers')
     parser.add_argument('-r', default='html', nargs='?', help='Path to DOCUMENT_ROOT, relative to httpd.py')
-    parser.add_argument('--log_level', type=str, default='INFO', nargs='?', help='Log level')
+    parser.add_argument('--log_level', type=str, default='DEBUG', nargs='?', help='Log level')
     args: argparse.Namespace = parser.parse_args()
     log_level = getattr(logging, args.log_level.upper(), None)
     if not isinstance(log_level, int):
@@ -217,24 +229,35 @@ if __name__ == "__main__":
     server_socket.listen(5)
     logging.info('Server started')
 
-    processes = []
-    queues = []
-    for i in range(args.w):
-        queue = multiprocessing.Queue()
-        process = multiprocessing.Process(target=main, args=(i, queue, args.r, log_level, server_socket))
-        process.start()
-        processes.append(process)
-        queues.append(queue)
+    pool = multiprocessing.Pool(args.w)  # use 4 worker processes
+
+    # processes = []
+    # queues = []
+    # for i in range(args.w):
+    #     queue = multiprocessing.Queue()
+    #     process = multiprocessing.Process(target=main, args=(i, queue, args.r, log_level, server_socket))
+    #     process.start()
+    #     processes.append(process)
+    #     queues.append(queue)
     #
+    n = 0
     while 1:
         try:
             # logging.info("Before sel")
-            ready_to_read, _, _ = select.select([server_socket], [], [])
-            # client_socket, addr = server_socket.accept()  # read
+            n += 1
+            # ready_to_read, _, _ = select.select([server_socket], [], [])
+            client_socket, addr = server_socket.accept()  # read
+            # logging.info(f'Accepted from {addr}')
+
+            pool.apply_async(main, args=(client_socket, log_level))
+
+            # request = client_socket.recv(28096)  # read
+            # client_socket.send(f'hello, hi_{n}'.encode())
+            # client_socket.close()
             # logging.info("After sel")
             # logging.info(f"Connection from {addr}.")
-            qn = random.randint(0, args.w-1)
-            queues[qn].put(1)
+            # qn = random.randint(0, args.w-1)
+            # queues[qn].put(1)
             # logging.info(f"Put to a queue {qn}")
             # queues[0].put(client_socket)
     #         print(queues[0].qsize())

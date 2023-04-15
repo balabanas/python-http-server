@@ -2,7 +2,7 @@
 Custom HTTP Server on 'vanilla' Python
 
 ## Goal
-To develop my own web server and implement certain parts of the HTTP protocol:
+To develop custom web server and implement certain parts of the HTTP protocol:
 * Do not use libraries that assist with HTTP operations.
 * Test the server under load.
 
@@ -16,3 +16,11 @@ The server is capable of:
 7. For successful GET requests, responding with the headers `Date`, `Server`, `Content-Length`, `Content-Type`, and `Connection`.
 8. Returning the correct `Content-Type` for `.html`, `.css`, `.js`, `.jpg`, `.jpeg`, `.png`, `.gif`, and `.swf` files.
 9. Accept spaces and `%XX` in the file names
+
+
+To install ab on ubuntu:
+* `apt-get update`
+* `apt-get install apache2-utils`
+
+To test from ubuntu running in docker the webserver, which is run on Windows host: 
+* 
