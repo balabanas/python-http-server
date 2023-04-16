@@ -6,7 +6,7 @@ import os
 import socket
 
 HOST = 'localhost'
-PORT = 8081
+PORT = 80
 SERVER_NAME = 'ServerName'
 
 
