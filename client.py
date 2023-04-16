@@ -1,3 +1,5 @@
+"""Test client, to issue simple requests to a server"""
+
 import socket
 
 HOST = 'localhost'

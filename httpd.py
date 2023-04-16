@@ -3,106 +3,160 @@ import datetime
 import logging
 import multiprocessing
 import os
-import random
 import socket
-import time
-import urllib
-from multiprocessing import Pool
-
-import select
 
 HOST = 'localhost'
 PORT = 8081
-DOCUMENT_ROOT = 'html'
 SERVER_NAME = 'ServerName'
 
-# tasks = []
-# to_read = {}
-# to_write = {}
+
+def url_decode(url_encoded_string):
+    """Decodes urlencoded strings into `normal` strings"""
+    decoded_string = ""
+    index = 0
+    while index < len(url_encoded_string):
+        if url_encoded_string[index] == '%':
+            decoded_string += chr(int(url_encoded_string[index+1:index+3], 16))
+            index += 3
+        else:
+            decoded_string += url_encoded_string[index]
+            index += 1
+    return decoded_string
 
 
-def get_index(path: str) -> (bytes, bytes):
-    server_name = f"\r\nServer: {SERVER_NAME}"
-    date = f"\r\nDate: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}"
+class Response:
+    """"Keeps response elements and packs them to a complete response before sending back to a client"""
+    def __init__(self):
+        self.status = "HTTP/1.0 400 Bad Request"
+        self.headers = {
+            'Server': SERVER_NAME,
+            'Connection': 'close',
+            'Content-Length': 0,
+        }
+        self.body = b''
+        self.headers['Data'] = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
 
-    path = urllib.parse.urlparse(path)
-    path = urllib.parse.unquote(path.path)
+    def pack_response(self):
+        headers = '\r\n'.join([f'{k}: {v}' for k, v in self.headers.items()])
+        header = f"{self.status}\r\n{headers}\r\n\r\n"
+        header = header.encode('utf-8')
+        return header + self.body
 
-    # document_root = os.path.abspath(DOCUMENT_ROOT)
-    request_abs_path = os.path.abspath(os.path.join(document_root, path.lstrip('/')))
 
-    if not request_abs_path.startswith(document_root):
-        return f"HTTP/1.0 403 Forbidden\r\nContent-Length: 0{server_name}{date}\r\n\r\n".encode('utf-8'), b''
+class GETHEADHTTPWorker:
+    def __init__(self, doc_root):
+        logging.info(f"{multiprocessing.current_process().name} running...")
+        self.abs_root = os.path.abspath(doc_root)
 
-    if path.split('/')[-1]:  # file requested
-        return get_file(request_abs_path)
-    elif os.path.exists(os.path.join(request_abs_path, 'index.html')):  # dir requested, and index.html exists
-        return get_file(os.path.join(request_abs_path, 'index.html'))
-    else:  # dir requested, but no index.html there
-        return f"HTTP/1.0 404 Not Found\r\nContent-Length:0{server_name}{date}\r\n\r\n".encode('utf-8'), b''
+    def get_url(self, path: str) -> (str, dict, bytes):
+        """Returns response components with body content from files if path is valid, or error status, if not"""
+        logging.debug(f"{multiprocessing.current_process().name} - start get_url")
+        path = url_decode(path)
+        path = path.split('?')[0]
+        logging.debug(f"{multiprocessing.current_process().name} - path parsed, {path}")
+        request_abs_path = os.path.abspath(os.path.join(self.abs_root, path.lstrip('/')))
+        logging.debug(f"Serving from path {request_abs_path}")
+        logging.debug(request_abs_path)
+        if not request_abs_path.startswith(self.abs_root):
+            return "HTTP/1.0 403 Forbidden", {}, b''
+        if path.split('/')[-1]:  # file requested
+            _, file_extension = os.path.splitext(request_abs_path)
+            proc = ContentTypeFactory.get_content_type_processor(request_abs_path, file_extension)
+            return proc.read()
+        elif os.path.exists(os.path.join(request_abs_path, 'index.html')):  # dir requested, and index.html exists
+            proc = ContentTypeFactory.get_content_type_processor(os.path.join(request_abs_path, 'index.html'), '.html')
+            return proc.read()
+        return "HTTP/1.0 404 Not Found", {}, b''
+
+    def client(self, current_socket):
+        request = current_socket.recv(28096)  # read
+        logging.debug(f"{multiprocessing.current_process().name} Got request {request.decode()}")
+        response = Response()
+        if request:
+            method: str = ''
+            path: str = ''
+            request = request.decode('utf-8')
+            request_lines = request.splitlines()
+            try:
+                method, path, protocol = request_lines[0].split()
+            except ValueError:  # bad request
+                pass
+
+            if method in ['GET', 'HEAD']:
+                status, headers, body = self.get_url(path)
+                response.status = status
+                response.headers.update(headers)
+                match method:
+                    case 'GET':
+                        response.body = body
+
+            elif not method:
+                response.status = "HTTP 405 Method Not Allowed "
+                response.headers['Allow'] = "GET, HEAD"
+
+        current_socket.send(response.pack_response())
+        logging.debug(f"Sent to {current_socket}: {response.pack_response()}")
+        current_socket.shutdown(socket.SHUT_WR)
+        current_socket.close()
 
 
 class ContentTypeProcessor:
+    """Read contents from disk by path, and returns it in response components, or 404"""
+    content_type = 'text/plain'
+
     def __init__(self, path='', read_mode='r'):
         self.path = path
         self.read_mode = read_mode
 
-    def read(self):
-        server_name = f"\r\nServer: {SERVER_NAME}"
-        date = f"\r\nDate: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}"
+    def read(self) -> (str, dict, bytes):
         try:
             with open(self.path, 'rb') as f:
                 content = f.read()
         except (FileNotFoundError, PermissionError):
-            return f"HTTP/1.0 404 Not Found\r\nContent-Length:0{server_name}{date}\r\n\r\n".encode('utf-8'), b''
+            headers = {'Content-Length': 0}
+            return "HTTP/1.0 404 Not Found", headers, b''
         content_type = self.get_content_type()
         content_len = len(content)
-        headers = f"HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {content_len}{server_name}{date}\r\n\r\n".encode(
-            'utf-8')
-        return headers, content
+        headers = {
+            'Content-Length': content_len,
+            'Content-Type': content_type
+        }
+        return "HTTP/1.0 200 OK", headers, content
 
     def get_content_type(self):
-        pass
+        return self.content_type
 
 
 class ContentTypeProcessorCSS(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/css'
+    content_type = 'text/css'
 
 
 class ContentTypeProcessorHTML(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/html'
+    content_type = 'text/html'
 
 
 class ContentTypeProcessorPlainText(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/plain'
+    content_type = 'text/plain'
 
 
 class ContentTypeProcessorGIF(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'image/gif'
+    content_type = 'image/gif'
 
 
 class ContentTypeProcessorJPEG(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'image/jpeg'
+    content_type = 'image/jpeg'
 
 
 class ContentTypeProcessorJS(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'text/javascript'
+    content_type = 'text/javascript'
 
 
 class ContentTypeProcessorPNG(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'image/png'
+    content_type = 'image/png'
 
 
 class ContentTypeProcessorSWF(ContentTypeProcessor):
-    def get_content_type(self):
-        return 'application/x-shockwave-flash'
+    content_type = 'application/x-shockwave-flash'
 
 
 class ContentTypeFactory:
@@ -126,140 +180,42 @@ class ContentTypeFactory:
             return ContentTypeProcessorPlainText(path, 'r')
 
 
-def get_file(path: str) -> (bytes, bytes):
-    # full_path = f'{DOCUMENT_ROOT}{path}'
-    _, file_extension = os.path.splitext(path)
-    proc = ContentTypeFactory.get_content_type_processor(path, file_extension)
-    return proc.read()
+def main(worker_socket, doc_root, worker_log_level):
+    logger = logging.getLogger()
+    logger.setLevel(worker_log_level)
+    try:
+        worker = GETHEADHTTPWorker(doc_root)
+        worker.client(worker_socket)
+    except KeyboardInterrupt:
+        pass
 
-
-def client(client_socket):
-    while 1:
-        if not client_socket._closed:
-            yield ('read', client_socket)
-            try:
-                request = client_socket.recv(28096)  # read
-                # logging.info(f"Request: {request}")
-            except ConnectionResetError:
-                break
-        else:
-            break
-
-        if not request:
-            break
-        else:
-
-            server_name = f"\r\nServer: {SERVER_NAME}"
-            date = f"\r\nDate: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}"
-
-            request = request.decode('utf-8')
-            request_lines = request.splitlines()
-            try:
-                method, path, protocol = request_lines[0].split()
-            except ValueError:  # bad request, not implemented
-                break
-
-            yield ('write', client_socket)
-            if method in ['GET', 'HEAD']:
-                headers: bytes
-                body: bytes
-                headers, body = get_index(path)
-                if method == 'GET':
-                    response = headers + body
-                else:
-                    response = headers
-            else:
-
-                response = f"HTTP/1.0 405 Method Not Allowed\r\nContent-Length: 13\r\nAllow: GET, HEAD{server_name}{date}\r\n\r\nNot implemented".encode(
-                    'utf-8')
-            try:
-                client_socket.sendall(response)
-                logging.info(f"Sent response: {response}")
-                client_socket.shutdown(socket.SHUT_WR)
-                client_socket.close()
-            except ConnectionResetError:
-                pass
-
-    # logging.info(f"Closing connection: {client_socket}")
-    # client_socket.shutdown(socket.SHUT_WR)
-    # client_socket.close()
-
-
-def event_loop(pn, tasks, queue):
-    to_read = {}
-    to_write = {}
-    # while any([tasks, to_read, to_write]):
-    while 1:
-        try:
-            new_connection = queue.get_nowait()
-            to_read[new_connection] = client(new_connection)
-        except:
-            pass
-        if any([tasks, to_read, to_write]):
-            while not tasks:
-                ready_to_read, ready_to_write, _ = select.select(to_read, to_write, [])
-                # print(ready_to_read, ready_to_write, _)
-                for sock in ready_to_read:
-                    tasks.append(to_read.pop(sock))
-                for sock in ready_to_write:
-                    tasks.append(to_write.pop(sock))
-            try:
-                task = tasks.pop(0)
-                # print('task', task)
-                reason, sock = next(task)
-                # print(reason, sock)
-                if reason == 'read':
-                    to_read[sock] = task
-                if reason == 'write':
-                    to_write[sock] = task
-            except StopIteration:
-                pass
-                # logging.info('Done!')
-
-
-def main(pn, queue):
-    log_format: str = 'Worker ' + str(pn) +'. %(asctime)s %(levelname).1s %(message)s'
-    logging.basicConfig(format=log_format, filename='', level='INFO',
-                        datefmt='%Y-%m-%d %H:%M:%S')
-    tasks = []
-    event_loop(pn, tasks, queue)
 
 if __name__ == "__main__":
     parser: argparse.ArgumentParser = argparse.ArgumentParser()
-    parser.add_argument('-w', default=1, nargs='?', help='Number of workers')
+    parser.add_argument('-w', default=4, nargs='?', help='Number of workers')
     parser.add_argument('-r', default='html', nargs='?', help='Path to DOCUMENT_ROOT, relative to httpd.py')
+    parser.add_argument('--log_level', type=str, default='ERROR', nargs='?', help='Log level')
     args: argparse.Namespace = parser.parse_args()
-    log_format: str = '%(asctime)s %(levelname).1s %(message)s'
-    logging.basicConfig(format=log_format, filename='', level='INFO',
-                        datefmt='%Y-%m-%d %H:%M:%S')
+    log_level = getattr(logging, args.log_level.upper(), None)
+    if not isinstance(log_level, int):
+        raise ValueError(f"Invalid log level: {args.log_level}")
+    logging.basicConfig(filename='', datefmt='%Y-%m-%d %H:%M:%S', level=log_level)
+
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
     server_socket.listen(5)
     logging.info('Server started')
-
-    processes = []
-    queues = []
-    n_workers = args.w
-    document_root = args.r
-    for i in range(n_workers):
-        queue = multiprocessing.Queue()
-        process = multiprocessing.Process(target=main, args=(i, queue))
-        process.start()
-        processes.append(process)
-        queues.append(queue)
-
+    pool = multiprocessing.Pool(args.w)
     while 1:
         try:
-            client_socket, addr = server_socket.accept()  # read
-            logging.info(f"Connection from {addr}.")
-            # if not n % 100:
-            #     logging.info(f"{n}, {queues[0].qsize()}")  # {queues[1].qsize()}, {queues[2].qsize()}, {queues[3].qsize()}
-            # shortest_queue = min(range(n_workers), key=lambda x: queues[x].qsize())
-            # queues[shortest_queue].put(client_socket)
-            queues[random.randint(0, n_workers-1)].put(client_socket)
+            client_socket, addr = server_socket.accept()
+            pool.apply_async(main, args=(client_socket, args.r, log_level))
+            logging.info(f"Connection from {addr}")
         except KeyboardInterrupt:
+            pool.terminate()
             break
 
-    for process in processes:
-        process.join()
+    pool.close()
+    pool.join()
+    server_socket.close()
